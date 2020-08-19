@@ -1,9 +1,11 @@
+import argparse
 import csv
 from collections import defaultdict
 import glob
 import json
 import os
 import pickle
+import sys
 import time
 from types import SimpleNamespace
 
@@ -18,17 +20,13 @@ import sent2vec
 import spacy
 import torch
 from tqdm import tqdm, trange
-from transformers import AutoTokenizer, AutoModel
 
 from eutils import PubmedSearch, PubmedDocFetch
-
-tokenizer = AutoTokenizer.from_pretrained("allenai/biomed_roberta_base")
-model = AutoModel.from_pretrained("allenai/biomed_roberta_base")
 
 from IPython import embed
 
 
-def collect_data(data_dir):
+def read_cord_data(data_dir):
     cord_uid_to_text = defaultdict(list)
 
     # open the file
@@ -394,8 +392,8 @@ def link_clusters(concept_metadata,
 
     # build knn index
     print('Finding closest synonyms to phrases...')
-    PHRASE_SYNONYM_KNN_PATH = './bin/phrase_synonym_knn.pkl'
-    if not os.path.exists(PHRASE_SYNONYM_KNN_PATH):
+    PHRASE_SYNONYM_KNN_FILENAME = './bin/phrase_synonym_knn.pkl'
+    if not os.path.exists(PHRASE_SYNONYM_KNN_FILENAME):
         name_ids, name_embeds = zip(*concept_metadata.name_id2embed.items())
         X = np.vstack(name_embeds) # these are the concept synonym embeddings
         X /= np.linalg.norm(X, axis=1)[:,np.newaxis]
@@ -425,10 +423,10 @@ def link_clusters(concept_metadata,
             'knn_synonyms' : knn_synonyms
         }
         phrase_synonym_knn_data = SimpleNamespace(**phrase_synonym_knn_data)
-        with open(PHRASE_SYNONYM_KNN_PATH, 'wb') as f_out:
+        with open(PHRASE_SYNONYM_KNN_FILENAME, 'wb') as f_out:
             pickle.dump(phrase_synonym_knn_data, f_out)
     else:
-        with open(PHRASE_SYNONYM_KNN_PATH, 'rb') as f_in:
+        with open(PHRASE_SYNONYM_KNN_FILENAME, 'rb') as f_in:
             phrase_synonym_knn_data = pickle.load(f_in)
 
     # for each cluster get top candidate concepts
@@ -469,92 +467,99 @@ def compute_and_cache(cache_path, fn_ptr, args):
 
 
 def get_and_check_args():
-    pass
+    # specify and gather cmdline args
+    parser = argparse.ArgumentParser(description='Biomedical concept discovery pipeline')
+    parser.add_argument('--data_source', type=str, choices=['pubmed_download', 'cord19'], required=True)
+    parser.add_argument('--cord_data_path', type=str)
+    parser.add_argument('--biosentvec_path', type=str, required=True)
+    parser.add_argument('--task', type=str, choices=['concept_discovery', 'top_concepts'], required=True)
+    parser.add_argument('--umls_lexicon_path', type=str, default='/home/ds-share/data2/users/rangell/entity_discovery/UMLS_preprocessing/AnntdData/')
+    parser.add_argument('--output_dir', type=str, required=True)
+    parser.add_argument('--output_file_stem', type=str, required=True)
+    args = parser.parse_args()
+
+    # check validity of arguments
+    assert args.data_source != 'cord19' or args.cord_data_path != None, \
+            "Must provide `--cord_data_path` or choose another data source"
+    assert args.task != 'concept_discovery' or args.umls_lexicon_path != None, \
+            "Must provide `--umls_lexicon_path` or choose another task"
+
+    return args
 
 
 if __name__ == '__main__':
+    args = get_and_check_args()
 
-    if not os.path.isdir('./bin'):
-        os.makedirs('./bin')
+    if not os.path.isdir(args.output_dir):
+        os.makedirs('args.output_dir')
+
+    CLUSTERING_THRESHOLD = 0.6
+
+    CORD_UID_TO_TEXT_FILENAME = os.path.join(args.output_dir, 'cord_uid_to_text.pkl')
+    CORD_UID_TO_PHRASES_FILENAME = os.path.join(args.output_dir, 'cord_uid_to_phrases.pkl')
+    PHRASE_METADATA_FILENAME = os.path.join(args.output_dir, 'clustering_metadata.pkl')
+    CLUSTERING_MODEL_FILENAME = os.path.join(args.output_dir, 'clustering_model.pkl')
+    CONCEPT_METADATA_FILENAME = os.path.join(args.output_dir, 'concept_metadata.pkl')
+    LINKED_CLUSTER_DATA_FILENAME = os.path.join(args.output_dir, 'linked_cluster_data.pkl')
+
+    # import and preprocess the documents
+    print('Preprocessing documents...')
+    if args.data_source == 'cord19':
+        id_to_text = compute_and_cache(
+                CORD_UID_TO_TEXT_FILENAME,
+                read_cord_data,
+                [args.cord_data_path]
+        )
+    elif args.data_source == 'pubmed_download':
+        raise NotImplementedError()
 
     embed()
     exit()
 
-    #UMLS_LEXICON_DIR = '/home/ds-share/data2/users/rangell/lerac/coref_entity_linking/data/mm_st21pv_long_entities/umls_lexicons'
-    UMLS_LEXICON_DIR = '/home/ds-share/data2/users/rangell/entity_discovery/UMLS_preprocessing/AnntdData/'
-    SENT2VEC_MODEL_PATH = './bin/BioSentVec_PubMed_MIMICIII-bigram_d700.bin'
-    CLUSTERING_THRESHOLD = 0.6
-
-    CORD_UID_TO_TEXT_PATH = './bin/cord_uid_to_text.pkl' 
-    CORD_UID_TO_PHRASES_PATH = './bin/cord_uid_to_phrases.pkl' 
-    PHRASE_METADATA_PATH = './bin/clustering_metadata.pkl'
-    CLUSTERING_MODEL_PATH = './bin/clustering_model.pkl'
-    CONCEPT_METADATA_PATH = './bin/concept_metadata.pkl'
-    LINKED_CLUSTER_DATA_PATH = './bin/linked_cluster_data.pkl'
-    DISCOVERED_ENTITIES_PATH = './bin/discovered_entities.txt'
-
-    # import and preprocess the documents
-    print('Preprocessing documents...')
-    cord_uid_to_text = compute_and_cache(
-            CORD_UID_TO_TEXT_PATH,
-            collect_data,
-            ['/iesl/canvas/rangell/entity_discovery/cord-19/2020-07-31/']
-    )
-
     # extract mentions
     print('Extracting mentions...')
-    cord_uid_to_phrases = compute_and_cache(
-            CORD_UID_TO_PHRASES_PATH,
+    id_to_phrases = compute_and_cache(
+            CORD_UID_TO_PHRASES_FILENAME,
             extract_mentions,
-            [cord_uid_to_text]
+            [id_to_text]
     )
 
     # create sent2vec model
-    #print('Loading BioSent2Vec model...')
-    #sent2vec_model = sent2vec.Sent2vecModel()
-    #sent2vec_model.load_model(SENT2VEC_MODEL_PATH)
+    print('Loading BioSent2Vec model...')
+    sent2vec_model = sent2vec.Sent2vecModel()
+    sent2vec_model.load_model(args.biosentvec_path)
 
     roberta_tokenizer = AutoTokenizer.from_pretrained("allenai/biomed_roberta_base")
     roberta_model = AutoModel.from_pretrained("allenai/biomed_roberta_base")
 
     # embed phrases and get metadata
     print('Preprocessing phrases...')
-    #phrase_metadata = compute_and_cache(
-    #        PHRASE_METADATA_PATH,
-    #        get_phrase_reps_and_metadata,
-    #        [cord_uid_to_phrases, sent2vec_model]
-    #)
     phrase_metadata = compute_and_cache(
-            PHRASE_METADATA_PATH,
-            get_phrase_reps_and_metadata_roberta,
-            [cord_uid_to_phrases, roberta_tokenizer, roberta_model]
+            PHRASE_METADATA_FILENAME,
+            get_phrase_reps_and_metadata,
+            [id_to_phrases, sent2vec_model]
     )
 
     # cluster phrases
     print('Clustering phrases...')
     clustering_model = compute_and_cache(
-            CLUSTERING_MODEL_PATH,
+            CLUSTERING_MODEL_FILENAME,
             cluster_phrases,
             [phrase_metadata]
     )
 
     # embed all concept synonyms and organize metdata
     print('Embedding all synonyms...')
-    #concept_metadata = compute_and_cache(
-    #        CONCEPT_METADATA_PATH,
-    #        embed_synonyms,
-    #        [sent2vec_model, UMLS_LEXICON_DIR]
-    #)
     concept_metadata = compute_and_cache(
-            CONCEPT_METADATA_PATH,
-            embed_synonyms_roberta,
-            [roberta_tokenizer, roberta_model, UMLS_LEXICON_DIR]
+            CONCEPT_METADATA_FILENAME,
+            embed_synonyms,
+            [sent2vec_model, args.umls_lexicon_path]
     )
 
     # link clusters to concepts
     print('Linking clusters...')
     linked_cluster_metadata = compute_and_cache(
-            LINKED_CLUSTER_DATA_PATH,
+            LINKED_CLUSTER_DATA_FILENAME,
             link_clusters,
             [concept_metadata,
              phrase_metadata,
@@ -563,8 +568,8 @@ if __name__ == '__main__':
     )
 
     # write to output file
-    print('Writing results to: {}...'.format(DISCOVERED_ENTITIES_PATH))
-    with open(DISCOVERED_ENTITIES_PATH, 'w') as f:
+    print('Writing results to: {}...'.format(os.path.join(args.output_file_stem, '.txt')))
+    with open(os.path.join(args.output_file_stem, '.txt'), 'w') as f:
         f.write(''.join(['=']*80) + '\n')
         _clusters = list(linked_cluster_metadata.cluster_id2phrase.items())
 
