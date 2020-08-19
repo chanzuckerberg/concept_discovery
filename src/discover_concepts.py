@@ -20,6 +20,8 @@ import torch
 from tqdm import tqdm, trange
 from transformers import AutoTokenizer, AutoModel
 
+from eutils import PubmedSearch, PubmedDocFetch
+
 tokenizer = AutoTokenizer.from_pretrained("allenai/biomed_roberta_base")
 model = AutoModel.from_pretrained("allenai/biomed_roberta_base")
 
@@ -466,10 +468,17 @@ def compute_and_cache(cache_path, fn_ptr, args):
     return output
 
 
+def get_and_check_args():
+    pass
+
+
 if __name__ == '__main__':
 
     if not os.path.isdir('./bin'):
         os.makedirs('./bin')
+
+    embed()
+    exit()
 
     #UMLS_LEXICON_DIR = '/home/ds-share/data2/users/rangell/lerac/coref_entity_linking/data/mm_st21pv_long_entities/umls_lexicons'
     UMLS_LEXICON_DIR = '/home/ds-share/data2/users/rangell/entity_discovery/UMLS_preprocessing/AnntdData/'
