@@ -3,6 +3,7 @@ import csv
 from collections import defaultdict
 import glob
 import json
+import math
 import os
 import pickle
 import sys
@@ -68,7 +69,22 @@ def read_cord_data(data_dir):
     return cord_uid_to_text
 
 
-def extract_mentions(cord_uid_to_text):
+def download_and_preprocess_pubmed(pmids):
+    doc_fetcher = PubmedDocFetch()
+    articles = doc_fetcher.fetch_documents(pmids)
+
+    id_to_text = defaultdict(list)
+    for article in articles:
+        d = {}
+        if article.title is not None:
+            d['title'] = article.title
+        if article.abstract is not None:
+            d['abstract'] = article.abstract
+        id_to_text[article.pmid].append(d)
+    return id_to_text
+
+
+def extract_mentions(id_to_text):
     #scispacy_model = spacy.load("en_core_sci_lg")
     scispacy_models = [
             spacy.load("en_ner_craft_md"),
@@ -77,100 +93,46 @@ def extract_mentions(cord_uid_to_text):
             spacy.load("en_ner_bionlp13cg_md")
     ]  
 
-    cord_uid_to_phrases = defaultdict(list)
-    for cord_uid, text in tqdm(cord_uid_to_text.items(),
+    id_to_noun_based_phrases = defaultdict(list)
+    id_to_other_based_phrases = defaultdict(list)
+    for id, text in tqdm(id_to_text.items(),
                                desc='extracting mentions'):
-        phrases = []
+        
+        noun_based_phrases = []
+        other_based_phrases = []
         for sub_text in text[0].values():
             if isinstance(sub_text, list):
                 sub_text = ' '.join(sub_text)
             for model in scispacy_models:
                 doc = model(sub_text)
-                tokens = [tok.text for tok in doc]
-                phrases.extend([
-                    (' '.join(tokens[:s.start]),
-                     s.as_doc().text.strip(),
-                     ' '.join(tokens[s.end:]))
-                        for s in doc.ents
-                ])
-        cord_uid_to_phrases[cord_uid] = phrases
-    return cord_uid_to_phrases
+                doc_tree = doc.to_json()
+                ent_strings = [s.as_doc().text.strip()
+                        for s in doc.ents]
+                for ent, ent_string in zip(doc_tree['ents'], ent_strings):
+                    start, end = ent['start'], ent['end']
+                    pos_tags = []
+                    for token in doc_tree['tokens']:
+                        if token['start'] >= start and token['end'] <= end:
+                            pos_tags.append(token['pos'])
+                    if 'NOUN' in pos_tags or 'PROPN' in pos_tags:
+                        noun_based_phrases.append(ent_string)  
+                    else:
+                        other_based_phrases.append(ent_string)
+        id_to_noun_based_phrases[id] = noun_based_phrases
+        id_to_other_based_phrases[id] = other_based_phrases
+    return id_to_noun_based_phrases, id_to_other_based_phrases
 
 
-def get_phrase_reps_and_metadata_roberta(cord_uid_to_phrases, tokenizer, model):
-    model.eval()
-
-    MAX_LEN = 128
-
-    id2embed = {}
-    phrase2id = defaultdict(set)
-    id2phrase = {}
-    doc2ids = defaultdict(set)
-    phrase2docs = defaultdict(set)
-    next_phrase_id = 0
-    for doc_id, phrases in tqdm(cord_uid_to_phrases.items(),
-                                desc='embedding phrases'):
-        for pre_text, ph, post_text in phrases:
-            #_ph = ' '.join(word_tokenize(ph))
-            #_emb = sent2vec_model.embed_sentence(_ph).reshape(-1,)
-
-            with torch.no_grad():
-                pre_ids = torch.tensor([tokenizer.convert_tokens_to_ids(tokenizer.tokenize(pre_text))]).type(torch.int64)
-                ph_ids = torch.tensor([tokenizer.convert_tokens_to_ids(tokenizer.tokenize(ph))]).type(torch.int64)
-                post_ids = torch.tensor([tokenizer.convert_tokens_to_ids(tokenizer.tokenize(post_text))]).type(torch.int64)
-
-                half_len = (MAX_LEN - ph_ids.numel()) // 2
-                if pre_ids.numel() < half_len and post_ids.numel() >= half_len:
-                    post_ids = post_ids[:,:(2*half_len) - pre_ids.numel()]
-                elif pre_ids.numel() >= half_len and post_ids.numel() < half_len:
-                    pre_ids = pre_ids[:,-((2*half_len) - post_ids.numel()):]
-                elif pre_ids.numel() >= half_len and post_ids.numel() >= half_len:
-                    pre_ids = pre_ids[:,-(half_len):]
-                    post_ids = post_ids[:,:half_len]
-
-                start_index = pre_ids.numel()
-                end_index = start_index + ph_ids.numel()
-
-                try:
-                    input_ids = torch.cat((pre_ids, ph_ids, post_ids), 1)
-                    assert input_ids.numel() <= MAX_LEN
-                    outputs = model(input_ids)
-                    _emb = torch.mean(outputs[0].squeeze(0)[start_index:end_index, :], 0).numpy()
-                except:
-                    embed()
-                    exit()
-
-            # only include embedable phrases (0.0 is oov)
-            if np.linalg.norm(_emb) != 0.0:
-                phrase2docs[ph].add(doc_id)
-                _id = next_phrase_id
-                next_phrase_id += 1
-                phrase2id[ph].add(_id)
-                id2phrase[_id] = ph
-                id2embed[_id] = _emb
-                doc2ids[doc_id].add(_id)
-
-    phrase_metadata = {
-        'id2embed' : id2embed,
-        'phrase2id' : phrase2id,
-        'id2phrase' : id2phrase,
-        'doc2ids' : doc2ids,
-        'phrase2docs' : phrase2docs
-    }
-    phrase_metadata = SimpleNamespace(**phrase_metadata)
-    return phrase_metadata
-
-
-def get_phrase_reps_and_metadata(cord_uid_to_phrases, sent2vec_model):
+def get_phrase_reps_and_metadata(id_to_phrases, sent2vec_model):
     id2embed = {}
     phrase2id = {}
     id2phrase = {}
     doc2ids = defaultdict(set)
     phrase2docs = defaultdict(set)
     next_phrase_id = 0
-    for doc_id, phrases in tqdm(cord_uid_to_phrases.items(),
+    for doc_id, phrases in tqdm(id_to_phrases.items(),
                                 desc='embedding phrases'):
-        for ph in phrases:
+        for ph in set(phrases):
             _ph = ' '.join(word_tokenize(ph))
             _emb = sent2vec_model.embed_sentence(_ph).reshape(-1,)
             # only include embedable phrases (0.0 is oov)
@@ -203,7 +165,7 @@ def build_coo_graph(ids, embeds, k=100):
     X = np.vstack(embeds)
     X /= np.linalg.norm(embeds, axis=1)[:,np.newaxis]
     d = X.shape[1]
-    n_cells = 10000
+    n_cells = int(math.sqrt(X.shape[0]))
     n_probe = 50
     quantizer = faiss.IndexFlat(d, faiss.METRIC_INNER_PRODUCT)
     index = faiss.IndexIVFFlat(
@@ -329,51 +291,6 @@ def embed_synonyms(sent2vec_model, umls_lexicon_dir):
     return concept_metadata
 
 
-def embed_synonyms_roberta(tokenizer, model, umls_lexicon_dir):
-    model.eval()
-
-    cuid2names = {}
-    cuid2type = {}
-    name_id2cuid = {}
-    name_id2name = {}
-    name_id2embed = {}
-    next_name_id = 0
-    
-    for fname in glob.glob(os.path.join(umls_lexicon_dir, '*.tsv')):
-        with open(fname, 'r') as f:
-            tsv_reader = csv.reader(f, delimiter='\t')
-            for row in tsv_reader:
-                if row[0][0] == '#':
-                    continue
-                cuid = row[1].replace('UMLS:', '')
-                cuid2names[cuid] = [row[0]] + row[-1].split('|') # the first one is the primary name
-                cuid2type[cuid] = '{} ({})'.format('None', 'None') # might care about this more later
-                for name in cuid2names[cuid]:
-                    #_name = ' '.join(word_tokenize(name))
-                    #_emb = sent2vec_model.embed_sentence(_name).reshape(-1,)
-                    with torch.no_grad():
-                        input_ids = torch.tensor([tokenizer.convert_tokens_to_ids(tokenizer.tokenize(name))])
-                        outputs = model(input_ids)
-                        _emb = torch.mean(outputs[0].squeeze(0), 0).numpy()
-
-                    # only include embedable phrases (0.0 is oov)
-                    if np.linalg.norm(_emb) != 0.0:
-                        name_id2cuid[next_name_id] = cuid
-                        name_id2name[next_name_id] = name
-                        name_id2embed[next_name_id] = _emb
-                        next_name_id += 1
-
-    concept_metadata = {
-        'cuid2names' : cuid2names,
-        'cuid2type' : cuid2type,
-        'name_id2cuid' : name_id2cuid,
-        'name_id2name' : name_id2name,
-        'name_id2embed' : name_id2embed,
-    }
-    concept_metadata = SimpleNamespace(**concept_metadata)
-    return concept_metadata
-
-
 def link_clusters(concept_metadata,
                   phrase_metadata,
                   clustering_model,
@@ -471,6 +388,7 @@ def get_and_check_args():
     parser = argparse.ArgumentParser(description='Biomedical concept discovery pipeline')
     parser.add_argument('--data_source', type=str, choices=['pubmed_download', 'cord19'], required=True)
     parser.add_argument('--cord_data_path', type=str)
+    parser.add_argument('--pubmed_special_query', type=str, choices=['latest_papers'])
     parser.add_argument('--biosentvec_path', type=str, required=True)
     parser.add_argument('--task', type=str, choices=['concept_discovery', 'top_concepts'], required=True)
     parser.add_argument('--umls_lexicon_path', type=str, default='/home/ds-share/data2/users/rangell/entity_discovery/UMLS_preprocessing/AnntdData/')
@@ -491,12 +409,12 @@ if __name__ == '__main__':
     args = get_and_check_args()
 
     if not os.path.isdir(args.output_dir):
-        os.makedirs('args.output_dir')
+        os.makedirs(args.output_dir)
 
     CLUSTERING_THRESHOLD = 0.6
 
-    CORD_UID_TO_TEXT_FILENAME = os.path.join(args.output_dir, 'cord_uid_to_text.pkl')
-    CORD_UID_TO_PHRASES_FILENAME = os.path.join(args.output_dir, 'cord_uid_to_phrases.pkl')
+    ID_TO_TEXT_FILENAME = os.path.join(args.output_dir, 'id_to_text.pkl')
+    ID_TO_PHRASES_FILENAME = os.path.join(args.output_dir, 'id_to_phrases.pkl')
     PHRASE_METADATA_FILENAME = os.path.join(args.output_dir, 'clustering_metadata.pkl')
     CLUSTERING_MODEL_FILENAME = os.path.join(args.output_dir, 'clustering_model.pkl')
     CONCEPT_METADATA_FILENAME = os.path.join(args.output_dir, 'concept_metadata.pkl')
@@ -506,20 +424,26 @@ if __name__ == '__main__':
     print('Preprocessing documents...')
     if args.data_source == 'cord19':
         id_to_text = compute_and_cache(
-                CORD_UID_TO_TEXT_FILENAME,
+                ID_TO_TEXT_FILENAME,
                 read_cord_data,
                 [args.cord_data_path]
         )
     elif args.data_source == 'pubmed_download':
-        raise NotImplementedError()
+        pubmed_search = PubmedSearch()
+        if args.pubmed_special_query == 'latest_papers':
+            pubmed_search.search('', create_date_range=('2020/08/01', '2020/08/30'), n_results=5000)
 
-    embed()
-    exit()
+        pmids = pubmed_search.get_search_response_dict()['response']['docids']
+        id_to_text = compute_and_cache(
+                ID_TO_TEXT_FILENAME,
+                download_and_preprocess_pubmed,
+                [pmids]
+        )
 
     # extract mentions
     print('Extracting mentions...')
-    id_to_phrases = compute_and_cache(
-            CORD_UID_TO_PHRASES_FILENAME,
+    id_to_noun_based_phrases, id_to_other_based_phrases = compute_and_cache(
+            ID_TO_PHRASES_FILENAME,
             extract_mentions,
             [id_to_text]
     )
@@ -529,15 +453,12 @@ if __name__ == '__main__':
     sent2vec_model = sent2vec.Sent2vecModel()
     sent2vec_model.load_model(args.biosentvec_path)
 
-    roberta_tokenizer = AutoTokenizer.from_pretrained("allenai/biomed_roberta_base")
-    roberta_model = AutoModel.from_pretrained("allenai/biomed_roberta_base")
-
     # embed phrases and get metadata
     print('Preprocessing phrases...')
     phrase_metadata = compute_and_cache(
             PHRASE_METADATA_FILENAME,
             get_phrase_reps_and_metadata,
-            [id_to_phrases, sent2vec_model]
+            [id_to_noun_based_phrases, sent2vec_model]
     )
 
     # cluster phrases
@@ -566,6 +487,9 @@ if __name__ == '__main__':
              clustering_model,
              CLUSTERING_THRESHOLD]
     )
+
+    embed()
+    exit()
 
     # write to output file
     print('Writing results to: {}...'.format(os.path.join(args.output_file_stem, '.txt')))
