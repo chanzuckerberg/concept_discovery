@@ -2,6 +2,8 @@
 
 ## Setup
 
+NOTE: Concept discovery requires UMLS access. See `/home/ds-share/data2/users/rangell/entity_discovery/UMLS_preprocessing/AnntdData/`.
+
 First install either [Miniconda](https://docs.conda.io/en/latest/miniconda.html) or [Anaconda](https://docs.anaconda.com/anaconda/install/) on your system. We prefer Miniconda since it is more minimal and will take less time to install.
 
 Next, create a conda environment and then activate it.
@@ -13,7 +15,7 @@ $  conda activate concept_disc
 
 Install standard packages
 ```bash
-$  conda install numpy scipy tqdm ipython
+$  conda install numpy scipy tqdm ipython cython
 ```
 
 Install faiss
