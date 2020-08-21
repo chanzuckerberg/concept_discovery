@@ -223,15 +223,28 @@ def coo_2_hg(coo_mat):
     return ugraph, dists.astype(np.float32)
 
 
-def cluster_phrases(phrase_metadata):
+def cluster_phrases(phrase_metadata, threshold):
     ids, embeds = zip(*phrase_metadata.id2embed.items())
     print('Building sparse graph...')
     coo_pw_sim_mat = build_coo_graph(ids, embeds, k=100)
     print('Running avg HAC...')
-    Z, t, altitudes, ugraph, edge_weights = sparse_avg_hac(coo_pw_sim_mat)
+    Z, _, _, _, _ = sparse_avg_hac(coo_pw_sim_mat)
+
+    print('Generating flat clustering...')
+    P = fcluster(Z, threshold)
+    cluster_id2phrase = defaultdict(set)
+    for i, _id in enumerate(phrase_metadata.id2embed.keys()):
+        assert i == _id
+        cluster_id2phrase[int(P[i])].add(phrase_metadata.id2phrase[_id])
+    cluster_id2phrase_id = {
+        cluster_id : set(map(lambda x : phrase_metadata.phrase2id[x], phrases))
+            for cluster_id, phrases in cluster_id2phrase.items()
+    }
 
     clustering_model = {
         'Z' : Z,
+        'cluster_id2phrase' : cluster_id2phrase,
+        'cluster_id2phrase_id' : cluster_id2phrase_id
     }
     clustering_model = SimpleNamespace(**clustering_model)
     return clustering_model
@@ -278,19 +291,7 @@ def embed_synonyms(sent2vec_model, umls_lexicon_dir):
 def link_clusters(concept_metadata,
                   phrase_metadata,
                   clustering_model,
-                  threshold,
                   output_dir):
-    # generate flat clustering
-    print('Generating flat clustering...')
-    P = fcluster(clustering_model.Z, threshold)
-    cluster_id2phrase = defaultdict(set)
-    for i, _id in enumerate(phrase_metadata.id2embed.keys()):
-        assert i == _id
-        cluster_id2phrase[int(P[i])].add(phrase_metadata.id2phrase[_id])
-    cluster_id2phrase_id = {
-        cluster_id : set(map(lambda x : phrase_metadata.phrase2id[x], phrases))
-            for cluster_id, phrases in cluster_id2phrase.items()
-    }
 
     # build knn index
     print('Finding closest synonyms to phrases...')
@@ -339,7 +340,7 @@ def link_clusters(concept_metadata,
                                          phrase_synonym_knn_data.D[i])) 
             for i in range(phrase_synonym_knn_data.D.shape[0])}
     cluster_id2cand_w_scores = {}
-    for cluster_id, phrase_ids in cluster_id2phrase_id.items():
+    for cluster_id, phrase_ids in clustering_model.cluster_id2phrase_id.items():
         cluster_candidates = [x for cands in map(lambda phrase_id : phrase_id2candidates[phrase_id], phrase_ids) for x in cands]
         candidates2scores = defaultdict(list)
         for cuid, synonym_id, synonym_score in cluster_candidates:
@@ -350,11 +351,27 @@ def link_clusters(concept_metadata,
 
     linked_cluster_metadata = {
         'cuid2names': concept_metadata.cuid2names,
-        'cluster_id2phrase': cluster_id2phrase,
+        'cluster_id2phrase': clustering_model.cluster_id2phrase,
         'cluster_id2cand_w_scores': cluster_id2cand_w_scores
     }
     linked_cluster_metadata = SimpleNamespace(**linked_cluster_metadata)
     return linked_cluster_metadata
+
+
+def write_top_concepts(args, phrase_metadata, clustering_model, output_filename):
+    # write to output file
+    print('Writing results to: {}...'.format(output_filename))
+    with open(output_filename, 'w') as f:
+        f.write(''.join(['=']*80) + '\n')
+        _clusters = list(clustering_model.cluster_id2phrase.items())
+        f_cluster2max_df = lambda y : max(list(map(lambda z : len(phrase_metadata.phrase2docs[z]), clustering_model.cluster_id2phrase[y])))
+        _clusters = list(filter(lambda x : f_cluster2max_df(x[0]) < args.max_doc_freq, _clusters)) # BEST: 300
+        _clusters.sort(key=lambda x : f_cluster2max_df(x[0]), reverse=True)
+        for cluster_id, phrases in _clusters[:100]:
+            phrase_counts = list(map(lambda x : len(phrase_metadata.phrase2docs[x]), phrases))
+            f.write('{}\n'.format(' ; '.join(map(lambda x : '{} ({})'.format(x[0], x[1]), sorted(list(zip(phrases, phrase_counts)), key=lambda x : x[1], reverse=True)))))
+            f.write(''.join(['=']*80) + '\n')
+    print('Done.')
 
 
 def write_discovered_concepts(args, phrase_metadata, concept_metadata, linked_cluster_metadata, output_filename):
@@ -414,7 +431,7 @@ def get_and_check_args():
     parser = argparse.ArgumentParser(description='Biomedical concept discovery pipeline')
     parser.add_argument('--data_source', type=str, choices=['pubmed_download', 'cord19'], required=True)
     parser.add_argument('--cord_data_path', type=str)
-    parser.add_argument('--pubmed_special_query', type=str, choices=['latest_papers', 'single_cell_biology'])
+    parser.add_argument('--pubmed_special_query', type=str, choices=['latest_papers', 'single_cell_biology', 'primary_ciliary_dyskinesia'])
     parser.add_argument('--biosentvec_path', type=str, required=True)
     parser.add_argument('--task', type=str, choices=['concept_discovery', 'top_concepts'], required=True)
     parser.add_argument('--umls_lexicon_path', type=str, default='/home/ds-share/data2/users/rangell/entity_discovery/UMLS_preprocessing/AnntdData/')
@@ -441,7 +458,7 @@ if __name__ == '__main__':
 
     ID_TO_TEXT_FILENAME = os.path.join(args.output_dir, 'id_to_text.pkl')
     ID_TO_PHRASES_FILENAME = os.path.join(args.output_dir, 'id_to_phrases.pkl')
-    PHRASE_METADATA_FILENAME = os.path.join(args.output_dir, 'clustering_metadata.pkl')
+    PHRASE_METADATA_FILENAME = os.path.join(args.output_dir, 'phrase_reps_metadata.pkl')
     CLUSTERING_MODEL_FILENAME = os.path.join(args.output_dir, 'clustering_model.pkl')
     CONCEPT_METADATA_FILENAME = os.path.join(args.output_dir, 'concept_metadata.pkl')
     LINKED_CLUSTER_DATA_FILENAME = os.path.join(args.output_dir, 'linked_cluster_data.pkl')
@@ -460,6 +477,9 @@ if __name__ == '__main__':
             pubmed_search.search('', create_date_range=('2020/07/01', '2020/08/30'), n_results=20000)
         elif args.pubmed_special_query == 'single_cell_biology':
             pubmed_search.search('single cell biology', create_date_range=('2018/01/01', '2020/08/30'), n_results=20000)
+        elif args.pubmed_special_query == 'primary_ciliary_dyskinesia':
+            pubmed_search.search('Primary Ciliary Dyskinesia', create_date_range=('2018/01/01', '2020/08/30'), n_results=20000)
+        
 
         pmids = pubmed_search.get_search_response_dict()['response']['docids']
         id_to_text = compute_and_cache(
@@ -467,6 +487,14 @@ if __name__ == '__main__':
                 download_and_preprocess_pubmed,
                 [pmids]
         )
+
+    # create the final output filename
+    output_filename = '.'.join([args.task,
+                                str(args.clustering_threshold).replace('.', '_'),
+                                str(args.max_linking_score).replace('.', '_'),
+                                str(args.max_doc_freq),
+                                'txt'])
+    output_filename = os.path.join(args.output_dir, output_filename)
 
     # extract mentions
     print('Extracting mentions...')
@@ -494,7 +522,7 @@ if __name__ == '__main__':
     clustering_model = compute_and_cache(
             CLUSTERING_MODEL_FILENAME,
             cluster_phrases,
-            [phrase_metadata]
+            [phrase_metadata, args.clustering_threshold]
     )
 
     if args.task == 'concept_discovery':
@@ -514,16 +542,10 @@ if __name__ == '__main__':
                 [concept_metadata,
                  phrase_metadata,
                  clustering_model,
-                 args.clustering_threshold,
                  args.output_dir]
         )
 
-        output_filename = '.'.join([args.task,
-                                    str(args.clustering_threshold).replace('.', '_'),
-                                    str(args.max_linking_score).replace('.', '_'),
-                                    str(args.max_doc_freq),
-                                    'txt'])
-        output_filename = os.path.join(args.output_dir, output_filename)
         write_discovered_concepts(args, phrase_metadata, concept_metadata, linked_cluster_metadata, output_filename)
     elif args.task == 'top_concepts':
-        raise NotImplementedError()
+        write_top_concepts(args, phrase_metadata, clustering_model, output_filename)
+        
