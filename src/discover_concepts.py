@@ -19,7 +19,6 @@ from scipy.cluster.hierarchy import fcluster
 import scispacy
 import sent2vec
 import spacy
-import torch
 from tqdm import tqdm, trange
 
 from eutils import PubmedSearch, PubmedDocFetch
@@ -244,23 +243,8 @@ def embed_synonyms(sent2vec_model, umls_lexicon_dir):
     name_id2cuid = {}
     name_id2name = {}
     name_id2embed = {}
+
     next_name_id = 0
-    #for fname in glob.glob(os.path.join(umls_lexicon_dir, '*.json')):
-    #    with open(fname, 'r') as f:
-    #        type_dict = json.load(f)
-    #    for cuid, concept_dict in type_dict['Concepts'].items():
-    #        cuid2names[cuid] = concept_dict['names'] # the first one is the primary name
-    #        cuid2type[cuid] = '{} ({})'.format(type_dict['TypeName'], type_dict['TypeID'])
-    #        for name in concept_dict['names']:
-    #            _name = ' '.join(word_tokenize(name))
-    #            _emb = sent2vec_model.embed_sentence(_name).reshape(-1,)
-    #            # only include embedable phrases (0.0 is oov)
-    #            if np.linalg.norm(_emb) != 0.0:
-    #                name_id2cuid[next_name_id] = cuid
-    #                name_id2name[next_name_id] = name
-    #                name_id2embed[next_name_id] = _emb
-    #                next_name_id += 1
-    
     for fname in glob.glob(os.path.join(umls_lexicon_dir, '*.tsv')):
         with open(fname, 'r') as f:
             tsv_reader = csv.reader(f, delimiter='\t')
@@ -294,7 +278,8 @@ def embed_synonyms(sent2vec_model, umls_lexicon_dir):
 def link_clusters(concept_metadata,
                   phrase_metadata,
                   clustering_model,
-                  threshold):
+                  threshold,
+                  output_dir):
     # generate flat clustering
     print('Generating flat clustering...')
     P = fcluster(clustering_model.Z, threshold)
@@ -309,7 +294,7 @@ def link_clusters(concept_metadata,
 
     # build knn index
     print('Finding closest synonyms to phrases...')
-    PHRASE_SYNONYM_KNN_FILENAME = './bin/phrase_synonym_knn.pkl'
+    PHRASE_SYNONYM_KNN_FILENAME = os.path.join(output_dir, 'phrase_synonym_knn.pkl')
     if not os.path.exists(PHRASE_SYNONYM_KNN_FILENAME):
         name_ids, name_embeds = zip(*concept_metadata.name_id2embed.items())
         X = np.vstack(name_embeds) # these are the concept synonym embeddings
@@ -372,6 +357,47 @@ def link_clusters(concept_metadata,
     return linked_cluster_metadata
 
 
+def write_discovered_concepts(args, phrase_metadata, concept_metadata, linked_cluster_metadata, output_filename):
+    # write to output file
+    print('Writing results to: {}...'.format(output_filename))
+    with open(output_filename, 'w') as f:
+        f.write(''.join(['=']*80) + '\n')
+        _clusters = list(linked_cluster_metadata.cluster_id2phrase.items())
+
+        # functions of clusters
+        f_cluster2top_score = lambda y : max(list(tuple(zip(*list(tuple(zip(*linked_cluster_metadata.cluster_id2cand_w_scores[y]))[1])))[1]))
+        f_cluster2max_df = lambda y : max(list(map(lambda z : len(phrase_metadata.phrase2docs[z]), linked_cluster_metadata.cluster_id2phrase[y])))
+        f_cluster2sum_df = lambda y : sum(list(map(lambda z : len(phrase_metadata.phrase2docs[z]), linked_cluster_metadata.cluster_id2phrase[y])))
+
+        # this sorts the clusters in ascending order of the score of the
+        # maximum scoring entity from UMLS 2017AA divided by the
+        # max of document frequencies of the phrases in the cluster
+        _clusters = list(filter(lambda x : f_cluster2top_score(x[0]) < args.max_linking_score, _clusters)) # BEST: 0.4
+        _clusters = list(filter(lambda x : f_cluster2max_df(x[0]) < args.max_doc_freq, _clusters)) # BEST: 300
+        _clusters.sort(key=lambda x : f_cluster2top_score(x[0]) / f_cluster2max_df(x[0]))
+
+        for cluster_id, phrases in _clusters[:100]:
+            _cand_w_scores = linked_cluster_metadata.cluster_id2cand_w_scores[cluster_id]
+            phrase_counts = list(map(lambda x : len(phrase_metadata.phrase2docs[x]), phrases))
+            if max(phrase_counts) == 1:
+                continue
+            f.write('Cluster phrases:\n')
+            f.write('----------------\n')  
+            f.write('{}\n\n'.format(' ; '.join(map(lambda x : '{} ({})'.format(x[0], x[1]), sorted(list(zip(phrases, phrase_counts)), key=lambda x : x[1], reverse=True)))))
+            f.write('Closest concepts:\n')
+            f.write('-----------------\n')  
+            for cuid, (top_scoring_synonym, score) in _cand_w_scores:
+                f.write('\tPrimary Name: {}\tType: {}\tMatching Synonym:{}\tScore:{}\n'.format(
+                        linked_cluster_metadata.cuid2names[cuid][0],
+                        concept_metadata.cuid2type[cuid],
+                        top_scoring_synonym,
+                        score)
+                )
+            f.write('\n')  
+            f.write(''.join(['=']*80) + '\n')
+    print('Done.')
+
+
 def compute_and_cache(cache_path, fn_ptr, args):
     if not os.path.exists(cache_path):
         output = fn_ptr(*args)
@@ -388,12 +414,14 @@ def get_and_check_args():
     parser = argparse.ArgumentParser(description='Biomedical concept discovery pipeline')
     parser.add_argument('--data_source', type=str, choices=['pubmed_download', 'cord19'], required=True)
     parser.add_argument('--cord_data_path', type=str)
-    parser.add_argument('--pubmed_special_query', type=str, choices=['latest_papers'])
+    parser.add_argument('--pubmed_special_query', type=str, choices=['latest_papers', 'single_cell_biology'])
     parser.add_argument('--biosentvec_path', type=str, required=True)
     parser.add_argument('--task', type=str, choices=['concept_discovery', 'top_concepts'], required=True)
     parser.add_argument('--umls_lexicon_path', type=str, default='/home/ds-share/data2/users/rangell/entity_discovery/UMLS_preprocessing/AnntdData/')
+    parser.add_argument('--clustering_threshold', type=float, default=0.6)
+    parser.add_argument('--max_linking_score', type=float, default=0.4)
+    parser.add_argument('--max_doc_freq', type=int, default=300)
     parser.add_argument('--output_dir', type=str, required=True)
-    parser.add_argument('--output_file_stem', type=str, required=True)
     args = parser.parse_args()
 
     # check validity of arguments
@@ -410,8 +438,6 @@ if __name__ == '__main__':
 
     if not os.path.isdir(args.output_dir):
         os.makedirs(args.output_dir)
-
-    CLUSTERING_THRESHOLD = 0.6
 
     ID_TO_TEXT_FILENAME = os.path.join(args.output_dir, 'id_to_text.pkl')
     ID_TO_PHRASES_FILENAME = os.path.join(args.output_dir, 'id_to_phrases.pkl')
@@ -431,7 +457,9 @@ if __name__ == '__main__':
     elif args.data_source == 'pubmed_download':
         pubmed_search = PubmedSearch()
         if args.pubmed_special_query == 'latest_papers':
-            pubmed_search.search('', create_date_range=('2020/08/01', '2020/08/30'), n_results=5000)
+            pubmed_search.search('', create_date_range=('2020/07/01', '2020/08/30'), n_results=20000)
+        elif args.pubmed_special_query == 'single_cell_biology':
+            pubmed_search.search('single cell biology', create_date_range=('2018/01/01', '2020/08/30'), n_results=20000)
 
         pmids = pubmed_search.get_search_response_dict()['response']['docids']
         id_to_text = compute_and_cache(
@@ -469,63 +497,33 @@ if __name__ == '__main__':
             [phrase_metadata]
     )
 
-    # embed all concept synonyms and organize metdata
-    print('Embedding all synonyms...')
-    concept_metadata = compute_and_cache(
-            CONCEPT_METADATA_FILENAME,
-            embed_synonyms,
-            [sent2vec_model, args.umls_lexicon_path]
-    )
+    if args.task == 'concept_discovery':
+        # embed all concept synonyms and organize metdata
+        print('Embedding all synonyms...')
+        concept_metadata = compute_and_cache(
+                CONCEPT_METADATA_FILENAME,
+                embed_synonyms,
+                [sent2vec_model, args.umls_lexicon_path]
+        )
 
-    # link clusters to concepts
-    print('Linking clusters...')
-    linked_cluster_metadata = compute_and_cache(
-            LINKED_CLUSTER_DATA_FILENAME,
-            link_clusters,
-            [concept_metadata,
-             phrase_metadata,
-             clustering_model,
-             CLUSTERING_THRESHOLD]
-    )
+        # link clusters to concepts
+        print('Linking clusters...')
+        linked_cluster_metadata = compute_and_cache(
+                LINKED_CLUSTER_DATA_FILENAME,
+                link_clusters,
+                [concept_metadata,
+                 phrase_metadata,
+                 clustering_model,
+                 args.clustering_threshold,
+                 args.output_dir]
+        )
 
-    embed()
-    exit()
-
-    # write to output file
-    print('Writing results to: {}...'.format(os.path.join(args.output_file_stem, '.txt')))
-    with open(os.path.join(args.output_file_stem, '.txt'), 'w') as f:
-        f.write(''.join(['=']*80) + '\n')
-        _clusters = list(linked_cluster_metadata.cluster_id2phrase.items())
-
-        # functions of clusters
-        f_cluster2top_score = lambda y : max(list(tuple(zip(*list(tuple(zip(*linked_cluster_metadata.cluster_id2cand_w_scores[y]))[1])))[1]))
-        f_cluster2max_df = lambda y : max(list(map(lambda z : len(phrase_metadata.phrase2docs[z]), linked_cluster_metadata.cluster_id2phrase[y])))
-        f_cluster2sum_df = lambda y : sum(list(map(lambda z : len(phrase_metadata.phrase2docs[z]), linked_cluster_metadata.cluster_id2phrase[y])))
-
-        # this sorts the clusters in ascending order of the score of the
-        # maximum scoring entity from UMLS 2017AA divided by the
-        # max of document frequencies of the phrases in the cluster
-        _clusters = list(filter(lambda x : f_cluster2top_score(x[0]) < 0.4, _clusters)) # BEST: 0.4
-        _clusters = list(filter(lambda x : f_cluster2max_df(x[0]) < 300, _clusters)) # BEST: 300
-        _clusters.sort(key=lambda x : f_cluster2top_score(x[0]) / f_cluster2max_df(x[0]))
-
-        for cluster_id, phrases in _clusters[:100]:
-            _cand_w_scores = linked_cluster_metadata.cluster_id2cand_w_scores[cluster_id]
-            phrase_counts = list(map(lambda x : len(phrase_metadata.phrase2docs[x]), phrases))
-            if max(phrase_counts) == 1:
-                continue
-            f.write('Cluster phrases:\n')
-            f.write('----------------\n')  
-            f.write('{}\n\n'.format(' ; '.join(map(lambda x : '{} ({})'.format(x[0], x[1]), sorted(list(zip(phrases, phrase_counts)), key=lambda x : x[1], reverse=True)))))
-            f.write('Closest concepts:\n')
-            f.write('-----------------\n')  
-            for cuid, (top_scoring_synonym, score) in _cand_w_scores:
-                f.write('\tPrimary Name: {}\tType: {}\tMatching Synonym:{}\tScore:{}\n'.format(
-                        linked_cluster_metadata.cuid2names[cuid][0],
-                        concept_metadata.cuid2type[cuid],
-                        top_scoring_synonym,
-                        score)
-                )
-            f.write('\n')  
-            f.write(''.join(['=']*80) + '\n')
-    print('Done.')
+        output_filename = '.'.join([args.task,
+                                    str(args.clustering_threshold).replace('.', '_'),
+                                    str(args.max_linking_score).replace('.', '_'),
+                                    str(args.max_doc_freq),
+                                    'txt'])
+        output_filename = os.path.join(args.output_dir, output_filename)
+        write_discovered_concepts(args, phrase_metadata, concept_metadata, linked_cluster_metadata, output_filename)
+    elif args.task == 'top_concepts':
+        raise NotImplementedError()
