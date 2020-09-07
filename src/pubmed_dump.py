@@ -22,8 +22,7 @@ from typing import Dict, Generator, List, Optional, Sequence, Set, Union
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape
 
-#from cr.nlp.abbrevs import get_abbrevs_ab3p
-from misc import PersistentObject
+from .misc import PersistentObject
 
 
 # -----------------------------------------------------------------------------
@@ -713,26 +712,6 @@ def lazy_parse_dump_file(pubmed_dump_file: str):
     return
 
 
-def extract_abbrevs(pubmed_files: List[str], abbrevs_file: str):
-    n_files = len(pubmed_files)
-    with open(abbrevs_file, "w") as fa:
-        for i, pubmedf in enumerate(sorted(pubmed_files)):
-
-            print(f"\n[{i+1}/{n_files}] Processing {pubmedf} ...\n", flush=True)
-
-            docs = parse_dump_file(pubmedf)
-            for doc in docs:
-                txt = doc.get_text()
-                abbrs = get_abbrevs_ab3p(txt)
-                for short, long in abbrs:
-                    if short and long:
-                        print(doc.pmid, short, long, sep="\t", file=fa)
-
-            print("\n   ", len(docs), " pubmed articles processed.\n", flush=True)
-
-    return
-
-
 def extract_from_pubmed_dump(pubmed_dump_file: str,
                              output_dir: str,
                              pmids_file: str = None,
@@ -876,14 +855,14 @@ def build_index(pubmed_dump_files_or_patt: Union[str, List[str]],
 #   Main
 # ======================================================================================================
 
-# Invoke as: python -m cr.pubmed.pubmed_dump CMD ...
+# Invoke as: python -m pubmed_dump CMD ...
 
 if __name__ == '__main__':
 
     import argparse
     from datetime import datetime
 
-    from cr.utils.misc import print_cmd
+    from .misc import print_cmd
 
     _argparser = argparse.ArgumentParser(
         description='PubMed Dump Parser.',
@@ -911,7 +890,7 @@ if __name__ == '__main__':
     _sub_cmd_parser = _subparsers.add_parser('build_index',
                                              help="Build and save PubmedDumpIndex.",
                                              description=("e.g.:  " +
-                                                          "python -m cr.pubmed.pubmed_dump build_index -n 10 " +
+                                                          "python -m pubmed_dump build_index -n 10 " +
                                                           "'../../PubMed/Data/D20191215/*.xml.gz' " +
                                                           "../../PubMed/Data/D20191215/pubmed_dump_index.pkl"))
 

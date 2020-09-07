@@ -21,7 +21,7 @@ import sent2vec
 import spacy
 from tqdm import tqdm, trange
 
-from eutils import PubmedSearch, PubmedDocFetch
+from .eutils import PubmedSearch, PubmedDocFetch
 
 from IPython import embed
 
@@ -33,7 +33,7 @@ def read_cord_data(data_dir):
     with open(os.path.join(data_dir, 'metadata.csv'), 'r') as f_in:
         reader = csv.DictReader(f_in)
         for row in tqdm(reader, desc='reading articles'):
-        
+
             # access some metadata
             cord_uid = row['cord_uid']
             title = row['title']
@@ -46,7 +46,7 @@ def read_cord_data(data_dir):
                 for json_path in row['pdf_json_files'].split('; '):
                     with open(os.path.join(data_dir, json_path)) as f_json:
                         full_text_dict = json.load(f_json)
-                        
+
                         # grab introduction section from *some* version of the full text
                         for paragraph_dict in full_text_dict['body_text']:
                             paragraph_text = paragraph_dict['text']
@@ -90,13 +90,13 @@ def extract_mentions(id_to_text):
             spacy.load("en_ner_jnlpba_md"),
             spacy.load("en_ner_bc5cdr_md"),
             spacy.load("en_ner_bionlp13cg_md")
-    ]  
+    ]
 
     id_to_noun_based_phrases = defaultdict(list)
     id_to_other_based_phrases = defaultdict(list)
     for id, text in tqdm(id_to_text.items(),
                                desc='extracting mentions'):
-        
+
         noun_based_phrases = []
         other_based_phrases = []
         for sub_text in text[0].values():
@@ -114,7 +114,7 @@ def extract_mentions(id_to_text):
                         if token['start'] >= start and token['end'] <= end:
                             pos_tags.append(token['pos'])
                     if 'NOUN' in pos_tags or 'PROPN' in pos_tags:
-                        noun_based_phrases.append(ent_string)  
+                        noun_based_phrases.append(ent_string)
                     else:
                         other_based_phrases.append(ent_string)
         id_to_noun_based_phrases[id] = noun_based_phrases
@@ -186,7 +186,7 @@ def build_coo_graph(ids, embeds, k=100):
     rows = rows[not_self_loop_mask]
     cols = cols[not_self_loop_mask]
     data = data[not_self_loop_mask]
-    
+
     # add in fake edge
     rows = np.concatenate((rows, np.arange(dim-1), np.arange(1, dim)), axis=0)
     cols = np.concatenate((cols, np.arange(1, dim), np.arange(dim-1)), axis=0)
@@ -337,7 +337,7 @@ def link_clusters(concept_metadata,
     cand_limit = 10
     phrase_id2candidates = {i : list(zip(phrase_synonym_knn_data.knn_cuids[i],
                                          phrase_synonym_knn_data.knn_synonyms[i],
-                                         phrase_synonym_knn_data.D[i])) 
+                                         phrase_synonym_knn_data.D[i]))
             for i in range(phrase_synonym_knn_data.D.shape[0])}
     cluster_id2cand_w_scores = {}
     for cluster_id, phrase_ids in clustering_model.cluster_id2phrase_id.items():
@@ -399,10 +399,10 @@ def write_discovered_concepts(args, phrase_metadata, concept_metadata, linked_cl
             if max(phrase_counts) == 1:
                 continue
             f.write('Cluster phrases:\n')
-            f.write('----------------\n')  
+            f.write('----------------\n')
             f.write('{}\n\n'.format(' ; '.join(map(lambda x : '{} ({})'.format(x[0], x[1]), sorted(list(zip(phrases, phrase_counts)), key=lambda x : x[1], reverse=True)))))
             f.write('Closest concepts:\n')
-            f.write('-----------------\n')  
+            f.write('-----------------\n')
             for cuid, (top_scoring_synonym, score) in _cand_w_scores:
                 f.write('\tPrimary Name: {}\tType: {}\tMatching Synonym:{}\tScore:{}\n'.format(
                         linked_cluster_metadata.cuid2names[cuid][0],
@@ -410,7 +410,7 @@ def write_discovered_concepts(args, phrase_metadata, concept_metadata, linked_cl
                         top_scoring_synonym,
                         score)
                 )
-            f.write('\n')  
+            f.write('\n')
             f.write(''.join(['=']*80) + '\n')
     print('Done.')
 
@@ -479,7 +479,7 @@ if __name__ == '__main__':
             pubmed_search.search('single cell biology', create_date_range=('2018/01/01', '2020/08/30'), n_results=20000)
         elif args.pubmed_special_query == 'primary_ciliary_dyskinesia':
             pubmed_search.search('Primary Ciliary Dyskinesia', create_date_range=('2018/01/01', '2020/08/30'), n_results=20000)
-        
+
 
         pmids = pubmed_search.get_search_response_dict()['response']['docids']
         id_to_text = compute_and_cache(
@@ -548,4 +548,4 @@ if __name__ == '__main__':
         write_discovered_concepts(args, phrase_metadata, concept_metadata, linked_cluster_metadata, output_filename)
     elif args.task == 'top_concepts':
         write_top_concepts(args, phrase_metadata, clustering_model, output_filename)
-        
+

@@ -17,8 +17,8 @@ from urllib.request import urlopen
 # noinspection PyPep8Naming
 import xml.etree.ElementTree as ET
 
-from misc import pprint_xml
-from pubmed_dump import Article
+from .misc import pprint_xml
+from .pubmed_dump import Article
 
 
 # -----------------------------------------------------------------------------

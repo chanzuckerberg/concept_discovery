@@ -1,8 +1,21 @@
 # Biomedical Concept Discovery
 
-## Setup
+## License
 
-NOTE: Concept discovery requires UMLS access. See `/home/ds-share/data2/users/rangell/entity_discovery/UMLS_preprocessing/AnntdData/`
+See [here](Licensing.md).
+
+## Code of Conduct
+
+This project adheres to the Contributor Covenant 
+[code of conduct](https://github.com/chanzuckerberg/.github/blob/master/CODE_OF_CONDUCT.md). 
+By participating, you are expected to uphold this code. 
+Please report unacceptable behavior to [opensource@chanzuckerberg.com](mailto:opensource@chanzuckerberg.com).
+
+## Project Satus: Unmaintained
+
+This project is unmaintained and unsupported.
+
+## Setup
 
 First install either [Miniconda](https://docs.conda.io/en/latest/miniconda.html) or [Anaconda](https://docs.anaconda.com/anaconda/install/) on your system. We prefer Miniconda since it is more minimal and will take less time to install.
 
@@ -107,3 +120,8 @@ Closest concepts:
 
 ================================================================================
 ```
+
+## Security Issues
+
+Please note: If you believe you have found a security issue, please responsibly disclose by contacting us at 
+[security@chanzuckerberg.com](mailto:security@chanzuckerberg.com).
