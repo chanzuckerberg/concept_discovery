@@ -2,7 +2,7 @@
 
 ## License
 
-See [here](Licensing.md).
+See [here](LICENSE.md).
 
 ## Code of Conduct
 
