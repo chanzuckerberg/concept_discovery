@@ -11,7 +11,7 @@ This project adheres to the Contributor Covenant
 By participating, you are expected to uphold this code. 
 Please report unacceptable behavior to [opensource@chanzuckerberg.com](mailto:opensource@chanzuckerberg.com).
 
-## Project Satus: Unmaintained
+## Project Status: Unmaintained
 
 This project is unmaintained and unsupported.
 
